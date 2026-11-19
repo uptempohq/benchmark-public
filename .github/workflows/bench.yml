@@ -1,0 +1,30 @@
+# RunsOn's cache benchmark (runs-on-demo/benchmark-public, cache.yml at
+# 5cbfb2c): save a 4 GiB random file, remove it, restore it, check its size.
+name: Bench cache
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: Runner label, ubuntu-24.04 or the scale set's name
+        required: true
+        default: ubuntu-24.04
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - run: head -c 4G /dev/urandom > cache-file
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache-file
+          key: bench-${{ github.run_id }}-${{ github.run_attempt }}
+      - run: rm cache-file
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache-file
+          key: bench-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - run: test "$(stat -c %s cache-file)" -eq 4294967296
