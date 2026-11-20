@@ -1,0 +1,95 @@
+# Time the same jobs as bench/nested/jobs.sh in the Uptempo repo.
+name: Bench job
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: Runner label, ubuntu-24.04 or the scale set's name
+        required: true
+        default: ubuntu-24.04
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: 1.27.4
+          cache: false
+      - run: |
+          cat >jobs.sh <<'EOF'
+          #!/bin/sh
+          set -eu
+
+          job=$1
+          dir=$2
+          shift 2
+          case "$job" in
+              files)
+                  goroot=$(go env GOROOT)
+                  mkdir -p "$dir/src"
+                  cp -rL "$goroot" "$dir/go"
+                  printf '%s\n' 'package main' 'import ("fmt"; "net/http")' 'func main() { fmt.Println(http.StatusText(200)) }' >"$dir/src/main.go"
+                  ;;
+              info)
+                  cpus=$(nproc)
+                  version=$("$dir/go/bin/go" version)
+                  printf 'nproc: %s\ngo: %s\n' "$cpus" "$version"
+                  ;;
+              cpu)
+                  dir=$(CDPATH='' cd "$dir" && pwd)
+                  export GOROOT="$dir/go" GOCACHE="$dir/cache" GOTMPDIR="$dir/tmp" HOME="$dir"
+                  export GOTOOLCHAIN=local GOPROXY=off GOFLAGS=-buildvcs=false CGO_ENABLED=0
+                  mkdir -p "$GOTMPDIR"
+                  "$GOROOT/bin/go" build -o "$dir/out" "$dir/src/main.go"
+                  ;;
+              disk)
+                  dd if=/dev/zero of="$dir/zero" bs=1M count=1024 conv=fsync
+                  ;;
+              time)
+                  label() {
+                      case "$1" in
+                          cpu) echo 'cpu: go build' ;;
+                          disk) echo 'disk: 1 GiB write and fsync' ;;
+                      esac
+                  }
+
+                  date -u
+                  cat /proc/loadavg
+                  "$@" sh "$0" info "$dir"
+                  dir=$(CDPATH='' cd "$dir" && pwd)
+                  work=$(mktemp -d "$(dirname "$dir")/job.XXXXXX")
+                  trap 'chmod -R u+w "$work"; rm -rf "$work"' 0
+                  for run in 0 1 2 3 4 5; do
+                      cp -R "$dir" "$work/files"
+                      for job in cpu disk; do
+                          start=$(date +%s%N)
+                          "$@" sh "$0" "$job" "$work/files"
+                          end=$(date +%s%N)
+                          ns=$((end - start))
+                          LC_ALL=C awk -v run="$run" -v name="$(label "$job")" -v ns="$ns" \
+                              'BEGIN { printf "run %d: %s: %.2fs\n", run, name, ns / 1e9 }'
+                          if [ "$run" -ne 0 ]; then
+                              printf '%s\n' "$ns" >>"$work/$job"
+                          fi
+                      done
+                      chmod -R u+w "$work/files"
+                      rm -rf "$work/files"
+                  done
+                  date -u
+                  cat /proc/loadavg
+                  echo '| Job | Median | Min | Max |'
+                  for job in cpu disk; do
+                      sort -n "$work/$job" | LC_ALL=C awk -v name="$(label "$job")" '
+                          { seconds[NR] = $1 / 1e9 }
+                          END { printf "| %s | %.2f s | %.2f s | %.2f s |\n", name, seconds[int(NR/2)+1], seconds[1], seconds[NR] }'
+                  done
+                  ;;
+              *) echo "unknown job command: $job" >&2; exit 2 ;;
+          esac
+          EOF
+          sh jobs.sh files "$RUNNER_TEMP/files"
+          sh jobs.sh time "$RUNNER_TEMP/files"
